@@ -1,0 +1,576 @@
+# Создай папку проекта
+mkdir minimalweek
+cd minimalweek
+#!/bin/bash
+
+# Создаём структуру папок
+mkdir -p app/src/main/java/com/example/minimalweek/{di,data/model,data/local/database,data/local/store,ui/theme,ui/screens,ui/navigation}
+mkdir -p app/src/main/res/{drawable,mipmap-anydpi,values}
+mkdir -p app/src/main/res/values
+
+# Создаём файлы
+
+cat > app/src/main/java/com/example/minimalweek/MinimalWeekApp.kt << 'EOF'
+package com.example.minimalweek
+
+import android.app.Application
+import dagger.hilt.android.HiltAndroidApp
+
+@HiltAndroidApp
+class MinimalWeekApp : Application()
+EOF
+
+cat > app/src/main/java/com/example/minimalweek/di/AppModule.kt << 'EOF'
+package com.example.minimalweek.di
+
+import android.app.Application
+import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.preferencesDataStore
+import androidx.room.Room
+import com.example.minimalweek.data.local.database.AppDatabase
+import com.example.minimalweek.data.local.store.GoalDataStore
+import dagger.Module
+import dagger.Provides
+import dagger.hilt.InstallIn
+import dagger.hilt.components.SingletonComponent
+import javax.inject.Singleton
+
+private val Application.dataStore: DataStore<Preferences> by preferencesDataStore(name = "settings")
+
+@Module
+@InstallIn(SingletonComponent::class)
+object AppModule {
+
+    @Provides
+    @Singleton
+    fun provideDatabase(app: Application): AppDatabase {
+        return Room.databaseBuilder(app, AppDatabase::class.java, "minimalweek.db")
+            .fallbackToDestructiveMigration()
+            .build()
+    }
+
+    @Provides
+    @Singleton
+    fun provideGoalDataStore(app: Application): GoalDataStore {
+        return GoalDataStore(app.dataStore)
+    }
+}
+EOF
+
+cat > app/src/main/java/com/example/minimalweek/data/model/Task.kt << 'EOF'
+package com.example.minimalweek.data.model
+
+import androidx.room.Entity
+import androidx.room.PrimaryKey
+import java.time.LocalDate
+
+@Entity(tableName = "tasks")
+data class Task(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val text: String,
+    val isCompleted: Boolean = false,
+    val dayOfWeek: Int,
+    val date: LocalDate
+)
+EOF
+
+cat > app/src/main/java/com/example/minimalweek/data/model/WeeklyGoal.kt << 'EOF'
+package com.example.minimalweek.data.model
+
+import androidx.room.Entity
+import androidx.room.PrimaryKey
+
+@Entity(tableName = "weekly_goal")
+data class WeeklyGoal(
+    @PrimaryKey val id: Int = 0,
+    val title: String,
+    val current: Int,
+    val target: Int
+)
+EOF
+
+cat > app/src/main/java/com/example/minimalweek/data/local/database/AppDatabase.kt << 'EOF'
+package com.example.minimalweek.data.local.database
+
+import androidx.room.Database
+import androidx.room.RoomDatabase
+import com.example.minimalweek.data.model.Task
+import com.example.minimalweek.data.model.WeeklyGoal
+
+@Database(
+    entities = [Task::class, WeeklyGoal::class],
+    version = 1,
+    exportSchema = false
+)
+abstract class AppDatabase : RoomDatabase() {
+    abstract fun taskDao(): TaskDao
+    abstract fun goalDao(): GoalDao
+}
+EOF
+
+cat > app/src/main/java/com/example/minimalweek/data/local/database/TaskDao.kt << 'EOF'
+package com.example.minimalweek.data.local.database
+
+import androidx.room.*
+import com.example.minimalweek.data.model.Task
+import java.time.LocalDate
+import kotlinx.coroutines.flow.Flow
+
+@Dao
+interface TaskDao {
+    @Query("SELECT * FROM tasks WHERE date = :date")
+    fun getTasksForDate(date: LocalDate): Flow<List<Task>>
+
+    @Query("SELECT * FROM tasks WHERE strftime('%Y-%W', date) = strftime('%Y-%W', :date)")
+    fun getWeeklyTasks(date: LocalDate): Flow<List<Task>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertTasks(tasks: List<Task>)
+
+    @Update
+    suspend fun updateTask(task: Task)
+
+    @Query("DELETE FROM tasks")
+    suspend fun clearAll()
+}
+EOF
+
+cat > app/src/main/java/com/example/minimalweek/data/local/database/GoalDao.kt << 'EOF'
+package com.example.minimalweek.data.local.database
+
+import androidx.room.*
+import com.example.minimalweek.data.model.WeeklyGoal
+
+@Dao
+interface GoalDao {
+    @Query("SELECT * FROM weekly_goal LIMIT 1")
+    suspend fun getGoal(): WeeklyGoal?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertGoal(goal: WeeklyGoal)
+
+    @Update
+    suspend fun updateGoal(goal: WeeklyGoal)
+}
+EOF
+
+cat > app/src/main/java/com/example/minimalweek/data/local/store/GoalDataStore.kt << 'EOF'
+package com.example.minimalweek.data.local.store
+
+import android.content.Context
+import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.preferencesDataStore
+import com.example.minimalweek.data.model.WeeklyGoal
+import kotlinx.coroutines.flow.map
+
+class GoalDataStore(private val context: DataStore<Preferences>) {
+
+    companion object {
+        private val TITLE = stringPreferencesKey("goal_title")
+        private val CURRENT = stringPreferencesKey("goal_current")
+        private val TARGET = stringPreferencesKey("goal_target")
+    }
+
+    val goalFlow = context.data.map { pref ->
+        WeeklyGoal(
+            title = pref[TITLE] ?: "",
+            current = (pref[CURRENT] ?: "0").toInt(),
+            target = (pref[TARGET] ?: "1").toInt()
+        )
+    }
+
+    suspend fun saveGoal(goal: WeeklyGoal) {
+        context.edit { pref ->
+            pref[TITLE] = goal.title
+            pref[CURRENT] = goal.current.toString()
+            pref[TARGET] = goal.target.toString()
+        }
+    }
+}
+EOF
+
+cat > app/src/main/java/com/example/minimalweek/ui/theme/Theme.kt << 'EOF'
+package com.example.minimalweek.ui.theme
+
+import android.os.Build
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.material3.*
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.platform.LocalContext
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun MinimalWeekTheme(
+    darkTheme: Boolean = isSystemInDarkTheme(),
+    dynamicColor: Boolean = true,
+    content: @Composable () -> Unit
+) {
+    val colorScheme = when {
+        dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
+            val context = LocalContext.current
+            if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
+        }
+        darkTheme -> darkColorScheme()
+        else -> lightColorScheme()
+    }
+
+    MaterialTheme(
+        colorScheme = colorScheme,
+        typography = Typography,
+        content = content
+    )
+}
+EOF
+
+cat > app/src/main/java/com/example/minimalweek/ui/screens/WeekScreen.kt << 'EOF'
+package com.example.minimalweek.ui.screens
+
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.*
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import com.example.minimalweek.data.model.Task
+import java.time.DayOfWeek
+import java.time.LocalDate
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun WeekScreen(
+    tasks: List<Task>,
+    onTaskToggle: (Task, Boolean) -> Unit,
+    onDayClick: (LocalDate) -> Unit
+) {
+    val days = (1..7).map {
+        LocalDate.now().with(DayOfWeek.of(it))
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Неделя") }
+            )
+        }
+    ) { padding ->
+        Column(Modifier.padding(padding)) {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Column(Modifier.padding(16.dp)) {
+                    Text("Твоя цель", style = MaterialTheme.typography.titleMedium)
+                    Text("Пробегать 3 раза в неделю", fontWeight = FontWeight.Medium)
+                    LinearProgressIndicator(
+                        progress = 0.67f,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 8.dp)
+                    )
+                }
+            }
+
+            LazyColumn {
+                items(days.size) { index ->
+                    val day = days[index]
+                    val dayTasks = tasks.filter { it.date == day }
+
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(8.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable { onDayClick(day) }
+                            .padding(12.dp)
+                    ) {
+                        Text(
+                            text = day.dayOfWeek.getDisplayName(),
+                            style = MaterialTheme.typography.titleLarge
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        dayTasks.forEach { task ->
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Checkbox(
+                                    checked = task.isCompleted,
+                                    onCheckedChange = { onTaskToggle(task, it) }
+                                )
+                                Text(
+                                    text = task.text,
+                                    modifier = Modifier.weight(1f),
+                                    color = if (task.isCompleted) MaterialTheme.colorScheme.outline else MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                        }
+                        if (dayTasks.isEmpty()) {
+                            Text("Нет задач", color = MaterialTheme.colorScheme.outline, style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun DayOfWeek.getDisplayName(): String {
+    return when (this) {
+        DayOfWeek.MONDAY -> "Понедельник"
+        DayOfWeek.TUESDAY -> "Вторник"
+        DayOfWeek.WEDNESDAY -> "Среда"
+        DayOfWeek.THURSDAY -> "Четверг"
+        DayOfWeek.FRIDAY -> "Пятница"
+        DayOfWeek.SATURDAY -> "Суббота"
+        DayOfWeek.SUNDAY -> "Воскресенье"
+    }
+}
+EOF
+
+cat > app/src/main/java/com/example/minimalweek/ui/navigation/AppNavigator.kt << 'EOF'
+package com.example.minimalweek.ui.navigation
+
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Modifier
+import androidx.navigation.NavHostController
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.rememberNavController
+import com.example.minimalweek.ui.screens.WeekScreen
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun AppNavigator(
+    navController: NavHostController = rememberNavController()
+) {
+    var tasks by remember { mutableStateOf<List<Task>>(emptyList()) }
+
+    Scaffold(
+        bottomBar = {
+            NavigationBar {
+                NavigationBarItem(
+                    selected = true,
+                    onClick = { /* no-op */ },
+                    icon = { Icon(Icons.Default.Home, "Неделя") },
+                    label = { Text("Неделя") }
+                )
+                NavigationBarItem(
+                    selected = false,
+                    onClick = { /* */ },
+                    icon = { Icon(Icons.Default.List, "Прогресс") },
+                    label = { Text("Прогресс") }
+                )
+            }
+        }
+    ) { padding ->
+        NavHost(
+            navController = navController,
+            startDestination = "week",
+            modifier = Modifier.padding(padding)
+        ) {
+            composable("week") {
+                WeekScreen(
+                    tasks = tasks,
+                    onTaskToggle = { task, checked -> /* todo */ },
+                    onDayClick = { /* todo */ }
+                )
+            }
+        }
+    }
+}
+EOF
+
+cat > app/src/main/java/com/example/minimalweek/MainActivity.kt << 'EOF'
+package com.example.minimalweek
+
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import com.example.minimalweek.ui.navigation.AppNavigator
+import com.example.minimalweek.ui.theme.MinimalWeekTheme
+import dagger.hilt.android.AndroidEntryPoint
+
+@AndroidEntryPoint
+class MainActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContent {
+            MinimalWeekTheme {
+                AppNavigator()
+            }
+        }
+    }
+}
+EOF
+
+# Создаём пустые файлы, которые нужны для сборки
+mkdir -p app/src/main/res/values
+echo '<resources><string name="app_name">MinimalWeek</string></resources>' > app/src/main/res/values/strings.xml
+echo '<resources></resources>' > app/src/main/res/values/colors.xml
+
+mkdir -p app/src/main/res/drawable
+touch app/src/main/res/drawable/ic_launcher_background.xml
+
+mkdir -p app/src/main/res/mipmap-anydpi
+touch app/src/main/res/mipmap-anydpi/ic_launcher.xml
+touch app/src/main/res/mipmap-anydpi/ic_launcher_round.xml
+
+# AndroidManifest.xml
+cat > app/src/main/AndroidManifest.xml << 'EOF'
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application
+        android:name=".MinimalWeekApp"
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
+EOF
+
+# build.gradle (Module: app) — УПРОЩЁННАЯ ВЕРСИЯ
+cat > app/build.gradle.kts << 'EOF'
+plugins {
+    id("com.android.application")
+    id("org.jetbrains.kotlin.android")
+    id("com.google.dagger.hilt.android")
+}
+
+android {
+    namespace = "com.example.minimalweek"
+    compileSdk = 34
+
+    defaultConfig {
+        applicationId = "com.example.minimalweek"
+        minSdk = 24
+        targetSdk = 34
+        versionCode = 1
+        versionName = "1.0"
+
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        vectorDrawables {
+            useSupportLibrary = true
+        }
+    }
+
+    buildTypes {
+        release {
+            isMinifyEnabled = false
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
+        }
+    }
+    compileOptions {
+        isCoreLibraryDesugaringEnabled = true
+        sourceCompatibility = JavaVersion.VERSION_1_8
+        targetCompatibility = JavaVersion.VERSION_1_8
+    }
+    kotlinOptions {
+        jvmTarget = "1.8"
+    }
+    buildFeatures {
+        compose = true
+    }
+    composeOptions {
+        kotlinCompilerExtensionVersion = "1.5.1"
+    }
+}
+
+dependencies {
+    implementation("androidx.core:core-ktx:1.13.1")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.4")
+    implementation("androidx.activity:activity-compose:1.9.0")
+    implementation(platform("androidx.compose:compose-bom:2024.08.00"))
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.ui:ui-graphics")
+    implementation("androidx.compose.ui:ui-tooling-preview")
+    implementation("androidx.compose.material3:material3")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.4")
+
+    // Room
+    implementation("androidx.room:room-runtime:2.6.1")
+    implementation("androidx.room:room-ktx:2.6.1")
+    annotationProcessor("androidx.room:room-compiler:2.6.1")
+
+    // DataStore
+    implementation("androidx.datastore:datastore-preferences:1.1.1")
+
+    // Hilt
+    implementation("com.google.dagger:hilt-android:2.51")
+    annotationProcessor("com.google.dagger:hilt-compiler:2.51")
+
+    // Navigation
+    implementation("androidx.navigation:navigation-compose:2.7.7")
+
+    // Desugaring
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
+
+    testImplementation("junit:junit:4.13.2")
+    androidTestImplementation("androidx.test.ext:junit:1.1.5")
+    androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")
+    androidTestImplementation(platform("androidx.compose:compose-bom:2024.08.00"))
+    androidTestImplementation("androidx.compose.ui:ui-test-junit4")
+    debugImplementation("androidx.compose.ui:ui-tooling")
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
+}
+EOF
+
+# settings.gradle
+cat > settings.gradle << 'EOF'
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+rootProject.name = "MinimalWeek"
+include ':app'
+EOF
+
+# gradle.properties — добавь для Hilt
+cat >> gradle.properties << 'EOF'
+android.useAndroidX=true
+android.enableJetifier=true
+kotlin.code.style=official
+EOF
+
+echo "✅ Проект MinimalWeek создан!"
+# Инициализируй Git
+git init
+
+# Привяжи к GitHub (замени <твой-юзер> на свой GitHub-логин)
+git remote add origin https://github.com/<твой-юзер>/minimalweek.git
